@@ -242,24 +242,51 @@ function MedicationsInner() {
   return (
     <div className="page">
       <ErrorNotice error={meds.error || devices.error} onRetry={() => { meds.refetch(); devices.refetch(); }} />
-      {isOwner && !loading && !device && (
-        <div className="banner" role="status">
+      
+      {/* Aviso amarelo inspirado no wireframe */}
+      {!current && (
+        <div className="banner banner-warning" role="status" style={{ marginBottom: 24, backgroundColor: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', display: 'flex', gap: '12px', alignItems: 'center' }}>
+          <Icon name="alert-triangle" size={24} />
+          <span className="grow"><strong>Aviso:</strong> para garantir um tratamento seguro, é importante conferir a receita e os dados na embalagem do medicamento quando for realizar o cadastro e a configuração dos alertas no sistema.</span>
+        </div>
+      )}
+
+      {isOwner && !loading && !device && !current && (
+        <div className="banner" role="status" style={{ marginBottom: 24 }}>
           <Icon name="info" size={20} />
           <span className="grow">Nenhuma caixa cadastrada. Cadastre a sua caixa para vincular cada medicamento a um compartimento.</span>
           <Link to="/app/dispositivos">Cadastrar caixa</Link>
         </div>
       )}
+      
       {loading ? (
         <div className="cmp-grid"><Skeleton height={150} /><Skeleton height={150} /><Skeleton height={150} /></div>
+      ) : current ? (
+        <div className="form-view-container" style={{ animation: 'fadeIn 0.3s ease' }}>
+          <div style={{ marginBottom: 20 }}>
+            <Button variant="outline" onClick={() => setSelected(null)}>
+              <Icon name="arrow-left" size={18} style={{ marginRight: 8 }} /> Voltar para os compartimentos
+            </Button>
+          </div>
+          <MedForm
+            index={current.index}
+            med={current.med}
+            compartment={current.compartment}
+            patient={patient}
+            onSaved={() => setSelected(null)}
+            onCancel={() => setSelected(null)}
+          />
+        </div>
       ) : (
         <>
+          <h3 style={{ fontSize: '1.1rem', marginBottom: '16px', fontWeight: 600 }}>Selecione um compartimento para continuar.</h3>
           <div className="cmp-grid">
             {slots.map((s) => (
               <div key={s.key} className={`card cmp-card${s.med ? '' : ' empty-slot'}`}>
                 <div className="row">
                   {s.index ? <MedIcon index={s.index} size={44} /> : <MedIcon size={44} />}
                   <button type="button" className="link-action" onClick={() => setSelected(s.key)}>
-                    {s.med ? 'Editar' : 'Cadastrar'}
+                    {s.med ? 'Editar' : '+ Cadastrar'}
                   </button>
                 </div>
                 {s.index && <p className="sub" style={{ marginBottom: 4 }}>Compartimento {s.index} · {COMPARTMENTS[s.index].name}</p>}
@@ -267,13 +294,13 @@ function MedicationsInner() {
                 <p className="sub">
                   {s.med
                     ? `${formatQty(s.med.doseQuantity, s.med.measure)} · ${(s.med.schedules || []).map((x) => String(x.time).slice(0, 5)).filter((v, i, a) => a.indexOf(v) === i).join(', ') || 'sem horário'}`
-                    : 'Nenhum medicamento neste compartimento'}
+                    : '-:- · 0 un.'}
                 </p>
               </div>
             ))}
             {!device && (
               <button type="button" className="card cmp-card empty-slot" onClick={() => setSelected('new')} style={{ textAlign: 'left' }}>
-                <div className="row"><MedIcon size={44} /><span className="link-action">Cadastrar</span></div>
+                <div className="row"><MedIcon size={44} /><span className="link-action">+ Cadastrar</span></div>
                 <h3>Novo medicamento</h3>
                 <p className="sub">Adicionar um medicamento ao tratamento</p>
               </button>
@@ -284,20 +311,6 @@ function MedicationsInner() {
           )}
           {inactive.length > 0 && (
             <p className="foot-note">{inactive.length} medicamento{inactive.length > 1 ? 's' : ''} desativado{inactive.length > 1 ? 's' : ''} não aparece{inactive.length > 1 ? 'm' : ''} nos compartimentos.</p>
-          )}
-          {current ? (
-            <div style={{ marginTop: 28 }}>
-              <MedForm
-                index={current.index}
-                med={current.med}
-                compartment={current.compartment}
-                patient={patient}
-                onSaved={() => setSelected(null)}
-                onCancel={() => setSelected(null)}
-              />
-            </div>
-          ) : (
-            <p className="foot-note" style={{ marginTop: 22 }}>Selecione um compartimento para cadastrar ou editar o medicamento.</p>
           )}
         </>
       )}
