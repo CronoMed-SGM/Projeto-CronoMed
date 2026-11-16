@@ -5,27 +5,12 @@ import { DeviceApi } from '../lib/api.js';
 import { errorMessage } from '../lib/errors.js';
 import { isValidMac, normalizeMac } from '../lib/validators.js';
 
-// UUIDs do pareamento Bluetooth (os mesmos de cronomed-firmware/Provisioning.cpp)
 const SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
 const CHAR_MAC_UUID = '19b10000-e8f2-537e-4f6c-d104768a1215';
 const CHAR_SSID_UUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
 const CHAR_PASS_UUID = '19b10002-e8f2-537e-4f6c-d104768a1214';
 const CHAR_SECRET_UUID = '19b10003-e8f2-537e-4f6c-d104768a1214';
 const CHAR_BROKER_UUID = '19b10004-e8f2-537e-4f6c-d104768a1214';
-
-const BROKER_KEY = 'cronomed.brokerHost';
-
-/** IP/host do Mosquitto que a CAIXA vai usar. "localhost" nao serve: a caixa precisa do IP do computador na rede. */
-function defaultBroker() {
-  try {
-    const saved = localStorage.getItem(BROKER_KEY);
-    if (saved) return saved;
-  } catch { /* armazenamento indisponivel */ }
-  const envHost = import.meta.env && import.meta.env.VITE_BROKER_HOST;
-  if (envHost) return envHost;
-  const h = window.location.hostname;
-  return h === 'localhost' || h === '127.0.0.1' ? '' : h;
-}
 
 const box = { maxWidth: 600, margin: '40px auto', padding: 32, backgroundColor: 'var(--surface, #fff)', borderRadius: 12, boxShadow: '0 4px 6px rgba(0,0,0,0.05)' };
 const input = { width: '100%', padding: 12, borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '1rem', boxSizing: 'border-box' };
@@ -39,26 +24,25 @@ export default function AddDevice() {
   const reconfigMac = searchParams.get('reconfigWifi') || '';
   const qc = useQueryClient();
 
-  const [etapa, setEtapa] = useState('BUSCA'); // BUSCA | WIFI | CONCLUIDO | MANUAL | MANUAL_OK
+  const [etapa, setEtapa] = useState('BUSCA');
   const [carregando, setCarregando] = useState(false);
   const [erro, setErro] = useState(null);
+  const [modoAviso, setModoAviso] = useState(''); // Aviso de reconfiguração amigável
 
-  const bleRef = useRef(null); // dispositivo Bluetooth (para reconectar se a conexao cair)
+  const bleRef = useRef(null);
   const [deviceMac, setDeviceMac] = useState('');
   const [deviceSecret, setDeviceSecret] = useState('');
 
   const [nomeCaixa, setNomeCaixa] = useState('Minha Caixa CronoMed');
   const [ssid, setSsid] = useState('');
   const [wifiPass, setWifiPass] = useState('');
-  const [broker, setBroker] = useState(defaultBroker);
   const [macManual, setMacManual] = useState('');
-
-  const brokerOk = broker.trim().length > 0 && !/^(localhost|127\.)/i.test(broker.trim());
 
   async function iniciarPareamento() {
     setErro(null);
+    setModoAviso('');
     if (!navigator.bluetooth) {
-      setErro('Este navegador não tem Bluetooth Web. Use o Google Chrome ou o Edge (em http://localhost ou https). Se não der, use "Cadastrar informando o MAC".');
+      setErro('Este navegador não tem Bluetooth Web. Use o Chrome ou Edge.');
       return;
     }
     setCarregando(true);
@@ -73,20 +57,28 @@ export default function AddDevice() {
       const macChar = await service.getCharacteristic(CHAR_MAC_UUID);
       const macLido = new TextDecoder('utf-8').decode(await macChar.readValue()).trim();
 
+      let ehReconfiguracao = false;
+
       if (reconfigMac) {
-        setDeviceMac(macLido);
-        setDeviceSecret('KEEP_EXISTING_SECRET');
+        ehReconfiguracao = true;
       } else {
-        let dados;
         try {
-          dados = await DeviceApi.register(macLido, nomeCaixa.trim());
+          // Tenta cadastrar como uma caixa nova
+          const dados = await DeviceApi.register(macLido, nomeCaixa.trim());
+          setDeviceSecret(dados.deviceSecret);
+          qc.invalidateQueries({ queryKey: ['devices'] });
         } catch (apiErr) {
-          throw new Error(errorMessage(apiErr, 'Não consegui cadastrar a caixa. Ela já está cadastrada?'));
+          // Se a API rejeitar (porque já é sua), entra no fluxo de troca de Wi-Fi silenciosamente!
+          ehReconfiguracao = true;
+          setModoAviso('A caixa já estava cadastrada! Vamos atualizar apenas a rede Wi-Fi.');
         }
-        qc.invalidateQueries({ queryKey: ['devices'] });
-        setDeviceMac(macLido);
-        setDeviceSecret(dados.deviceSecret);
       }
+
+      if (ehReconfiguracao) {
+        setDeviceSecret('KEEP_EXISTING_SECRET'); // Gatilho do C++ para manter a conta e mudar só a rede
+      }
+
+      setDeviceMac(macLido);
       setEtapa('WIFI');
     } catch (err) {
       if (err.name !== 'NotFoundError') setErro(err.message || 'Falha na conexão Bluetooth.');
@@ -98,10 +90,6 @@ export default function AddDevice() {
   async function configurarWifi(e) {
     e.preventDefault();
     setErro(null);
-    if (!brokerOk) {
-      setErro('Informe o IP do computador que roda o servidor (ex.: 192.168.0.10). "localhost" não funciona para a caixa.');
-      return;
-    }
     setCarregando(true);
     try {
       const dev = bleRef.current;
@@ -111,16 +99,17 @@ export default function AddDevice() {
       const enc = new TextEncoder();
       const write = async (uuid, value) => (await service.getCharacteristic(uuid)).writeValue(enc.encode(value));
 
+      // Lê a variável global injetada automaticamente pelo Vite (Sem .bat, sem .env manual!)
+      const brokerAutomatico = (typeof __IP_AUTOMATICO__ !== 'undefined' ? __IP_AUTOMATICO__ : '127.0.0.1').trim();
+
       await write(CHAR_SSID_UUID, ssid.trim());
       await write(CHAR_PASS_UUID, wifiPass);
-      await write(CHAR_BROKER_UUID, broker.trim());
-      await write(CHAR_SECRET_UUID, deviceSecret); // por último: é o gatilho para a caixa salvar e reiniciar
+      await write(CHAR_BROKER_UUID, brokerAutomatico); // IP enviado transparente para o ESP32
+      await write(CHAR_SECRET_UUID, deviceSecret);
 
-      try { localStorage.setItem(BROKER_KEY, broker.trim()); } catch { /* ignora */ }
       setEtapa('CONCLUIDO');
       setTimeout(() => navigate('/app/dispositivos'), 3500);
     } catch (err) {
-      // Se a caixa reiniciou logo depois do último envio, a conexão cai: isso é sucesso, não erro.
       setErro('Conexão perdida antes de terminar. Mantenha a caixa perto do computador e tente de novo.');
     } finally {
       setCarregando(false);
@@ -131,7 +120,7 @@ export default function AddDevice() {
     e.preventDefault();
     setErro(null);
     if (!isValidMac(macManual)) {
-      setErro('MAC inválido. Use o formato AA:BB:CC:DD:EE:FF (aparece no monitor serial da caixa).');
+      setErro('MAC inválido. Use o formato AA:BB:CC:DD:EE:FF.');
       return;
     }
     setCarregando(true);
@@ -142,7 +131,7 @@ export default function AddDevice() {
       setDeviceSecret(dados.deviceSecret);
       setEtapa('MANUAL_OK');
     } catch (err) {
-      setErro(errorMessage(err, 'Não consegui cadastrar a caixa.'));
+      setErro(errorMessage(err, 'Não consegui cadastrar a caixa. Ela já é de outra pessoa?'));
     } finally {
       setCarregando(false);
     }
@@ -150,7 +139,7 @@ export default function AddDevice() {
 
   return (
     <div style={box}>
-      <h2 style={{ marginTop: 0, fontSize: '1.5rem', marginBottom: 24 }}>Adicionar nova caixa</h2>
+      <h2 style={{ marginTop: 0, fontSize: '1.5rem', marginBottom: 24 }}>Adicionar ou Atualizar Caixa</h2>
 
       {erro && (
         <div role="alert" style={{ padding: 16, marginBottom: 24, backgroundColor: '#fef2f2', color: '#991b1b', borderRadius: 8, borderLeft: '4px solid #dc2626' }}>
@@ -161,8 +150,7 @@ export default function AddDevice() {
       {etapa === 'BUSCA' && (
         <div>
           <p style={{ marginBottom: 24, lineHeight: 1.5 }}>
-            Ligue a caixa CronoMed (sem Wi-Fi salvo ela fica em modo de pareamento). Vamos ler o endereço da caixa e
-            configurar a rede dela por Bluetooth.
+            Ligue a caixa CronoMed (sem Wi-Fi ela entra em modo pareamento). Vamos ler o MAC da caixa e configurar a rede via Bluetooth.
           </p>
           <div style={{ marginBottom: 24 }}>
             <label style={label} htmlFor="nome">Como quer chamar esta caixa?</label>
@@ -171,7 +159,7 @@ export default function AddDevice() {
           <div style={{ display: 'flex', gap: 16, marginTop: 32 }}>
             <button type="button" onClick={() => navigate('/app/dispositivos')} style={secondary}>Voltar</button>
             <button type="button" onClick={iniciarPareamento} disabled={carregando || !nomeCaixa.trim()} style={{ ...primary, opacity: carregando ? 0.7 : 1 }}>
-              {carregando ? 'Procurando a caixa…' : 'Conectar via Bluetooth'}
+              {carregando ? 'Conectando...' : 'Conectar via Bluetooth'}
             </button>
           </div>
           <p style={{ marginTop: 24, fontSize: 14 }}>
@@ -186,29 +174,21 @@ export default function AddDevice() {
       {etapa === 'WIFI' && (
         <form onSubmit={configurarWifi}>
           <div style={{ padding: 16, backgroundColor: '#f0fdf4', borderRadius: 8, marginBottom: 24, borderLeft: '4px solid #22c55e', color: '#166534' }}>
-            <strong>Caixa vinculada à sua conta!</strong>
+            <strong>{modoAviso ? modoAviso : 'Caixa vinculada à sua conta com sucesso!'}</strong>
             <div style={{ fontSize: 14, marginTop: 4 }}>MAC: {deviceMac}</div>
           </div>
-          <p style={{ marginBottom: 24 }}>Agora informe a rede Wi-Fi que a caixa deve usar e o endereço do servidor.</p>
+          <p style={{ marginBottom: 24 }}>Informe a rede Wi-Fi que a caixa deve se conectar.</p>
 
           <div style={{ marginBottom: 16 }}>
-            <label style={label} htmlFor="ssid">Nome da rede Wi-Fi</label>
+            <label style={label} htmlFor="ssid">Nome da rede Wi-Fi (SSID)</label>
             <input id="ssid" type="text" required value={ssid} onChange={(e) => setSsid(e.target.value)} style={input} autoComplete="off" />
           </div>
           <div style={{ marginBottom: 16 }}>
-            <label style={label} htmlFor="wpass">Senha da rede (deixe em branco se for aberta)</label>
+            <label style={label} htmlFor="wpass">Senha da rede (vazio se aberta)</label>
             <input id="wpass" type="password" value={wifiPass} onChange={(e) => setWifiPass(e.target.value)} style={input} autoComplete="off" />
           </div>
-          <div style={{ marginBottom: 32 }}>
-            <label style={label} htmlFor="broker">IP do computador que roda o servidor</label>
-            <input id="broker" type="text" required value={broker} onChange={(e) => setBroker(e.target.value)} style={input} placeholder="192.168.0.10" autoComplete="off" />
-            <div style={{ fontSize: 13, marginTop: 6, opacity: 0.75 }}>
-              No Windows: <code>ipconfig</code> → "Endereço IPv4" da mesma rede Wi-Fi da caixa. A caixa e o computador precisam estar na mesma rede.
-            </div>
-          </div>
-
           <button type="submit" disabled={carregando} style={{ ...primary, width: '100%', backgroundColor: '#22c55e', opacity: carregando ? 0.7 : 1 }}>
-            {carregando ? 'Enviando configuração…' : 'Configurar e reiniciar a caixa'}
+            {carregando ? 'Enviando Wi-Fi...' : 'Salvar Wi-Fi e Reiniciar Caixa'}
           </button>
         </form>
       )}
@@ -218,8 +198,8 @@ export default function AddDevice() {
           <div style={{ fontSize: 48, marginBottom: 16 }} aria-hidden="true">✅</div>
           <h3 style={{ color: '#16a34a', margin: '0 0 12px 0', fontSize: '1.5rem' }}>Pronto!</h3>
           <p style={{ margin: 0, lineHeight: 1.5 }}>
-            A caixa salvou a rede e está reiniciando para se conectar.<br />
-            Voltando para a lista de caixas…
+            A caixa salvou as configurações e está reiniciando.<br />
+            Voltando para os dispositivos…
           </p>
         </div>
       )}
@@ -227,8 +207,8 @@ export default function AddDevice() {
       {etapa === 'MANUAL' && (
         <form onSubmit={cadastrarManual}>
           <p style={{ marginBottom: 24, lineHeight: 1.5 }}>
-            Informe o MAC que a caixa mostra no monitor serial ao ligar (linha "MAC desta caixa"). A rede Wi-Fi fica no
-            arquivo <code>secrets.h</code> do firmware.
+            Informe o MAC que a caixa mostra no monitor serial (linha "MAC desta caixa").
+            A rede Wi-Fi fica fixa no <code>secrets.h</code> do firmware.
           </p>
           <div style={{ marginBottom: 16 }}>
             <label style={label} htmlFor="nomeM">Nome da caixa</label>
@@ -241,7 +221,7 @@ export default function AddDevice() {
           <div style={{ display: 'flex', gap: 16 }}>
             <button type="button" onClick={() => setEtapa('BUSCA')} style={secondary}>Voltar</button>
             <button type="submit" disabled={carregando || !nomeCaixa.trim()} style={{ ...primary, opacity: carregando ? 0.7 : 1 }}>
-              {carregando ? 'Cadastrando…' : 'Cadastrar caixa'}
+              {carregando ? 'Cadastrando...' : 'Cadastrar Manualmente'}
             </button>
           </div>
         </form>
@@ -254,10 +234,10 @@ export default function AddDevice() {
             <div style={{ fontSize: 14, marginTop: 4 }}>MAC: {deviceMac}</div>
           </div>
           <p style={{ lineHeight: 1.5, marginBottom: 12 }}>
-            Esta é a senha da caixa. Ela aparece <strong>somente agora</strong>; guarde-a (não compartilhe).
+            Esta é a senha interna da caixa. Copie e cole no <code>secrets.h</code>:
           </p>
           <code style={{ display: 'block', padding: 12, borderRadius: 8, background: 'rgba(0,0,0,0.06)', wordBreak: 'break-all', marginBottom: 24 }}>{deviceSecret}</code>
-          <button type="button" onClick={() => navigate('/app/dispositivos')} style={{ ...primary, width: '100%' }}>Já guardei a senha</button>
+          <button type="button" onClick={() => navigate('/app/dispositivos')} style={{ ...primary, width: '100%' }}>Já anotei</button>
         </div>
       )}
     </div>
