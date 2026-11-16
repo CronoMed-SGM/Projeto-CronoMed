@@ -111,7 +111,8 @@ function DosesInner() {
   const [snoozed, setSnoozed] = useState(() => new Map());
 
   const medById = useMemo(() => new Map(meds.map((m) => [m.id, m])), [meds]);
-  const list = doses.data || [];
+  // Filtra para remover da tela inicial as doses que já foram confirmadas ('TAKEN')
+  const list = (doses.data || []).filter(d => d.status !== 'TAKEN');
   const openDose = list.find((d) => d.id === openId) || null;
   const canConfirm = can('CONFIRM');
 
@@ -176,7 +177,7 @@ function DosesInner() {
         <div className="dose-grid"><Skeleton height={190} /><Skeleton height={190} /><Skeleton height={190} /></div>
       ) : list.length === 0 && !doses.error ? (
         <EmptyState icon="clock" title="Nenhuma dose para hoje" action={can('MANAGE') ? <Link className="btn btn-primary" to="/app/medicamentos">Cadastrar medicamento</Link> : null}>
-          Quando houver medicamentos com horário cadastrado, as doses do dia aparecem aqui.
+          Você não possui medicações pendentes para hoje ou todas já foram confirmadas.
         </EmptyState>
       ) : (
         <div className="dose-grid">
