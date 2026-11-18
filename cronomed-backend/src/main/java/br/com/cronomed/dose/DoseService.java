@@ -22,12 +22,16 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Registro e conciliacao de eventos de dose (RF25-RF28).
  *
- * <p>Regras centrais:
+ * <p>
+ * Regras centrais:
  * <ul>
- *   <li>A abertura da caixa (sensor) NUNCA baixa estoque; apenas registra o acesso fisico.</li>
- *   <li>A baixa so ocorre na confirmacao do usuario (CONFIRMED_YES) e no maximo uma vez por dose
- *       (a linha da dose e bloqueada e TAKEN e terminal).</li>
- *   <li>Idempotencia por UUID do evento: reenvios apos queda de rede sao descartados.</li>
+ * <li>A abertura da caixa (sensor) NUNCA baixa estoque; apenas registra o
+ * acesso fisico.</li>
+ * <li>A baixa so ocorre na confirmacao do usuario (CONFIRMED_YES) e no maximo
+ * uma vez por dose
+ * (a linha da dose e bloqueada e TAKEN e terminal).</li>
+ * <li>Idempotencia por UUID do evento: reenvios apos queda de rede sao
+ * descartados.</li>
  * </ul>
  */
 @Service
@@ -39,13 +43,13 @@ public class DoseService {
 
     /** Entrada de um evento originado por pessoa (app, site ou cuidador). */
     public record UserEventInput(UUID eventId, UUID scheduledDoseId, DoseEventType type, Instant occurredAt,
-                                 Long elapsedMs, Long seq, String justification) {
+            Long elapsedMs, Long seq, String justification) {
     }
 
     /** Comando interno ja resolvido (paciente/medicamento conhecidos). */
     public record Command(UUID eventId, UUID scheduledDoseId, UUID patientId, UUID medicationId, DoseEventType type,
-                          Source source, UUID actorUserId, UUID deviceId, Integer compartmentIndex,
-                          Instant occurredAt, Long clientSeq, String justification) {
+            Source source, UUID actorUserId, UUID deviceId, Integer compartmentIndex,
+            Instant occurredAt, Long clientSeq, String justification) {
     }
 
     private final ScheduledDoseRepository doses;
@@ -58,8 +62,8 @@ public class DoseService {
     private final Clock clock;
 
     public DoseService(ScheduledDoseRepository doses, DoseEventRepository events, MedicationRepository medications,
-                       CompartmentRepository compartments, StockService stock, AccessService access,
-                       AppProperties props, Clock clock) {
+            CompartmentRepository compartments, StockService stock, AccessService access,
+            AppProperties props, Clock clock) {
         this.doses = doses;
         this.events = events;
         this.medications = medications;
@@ -71,9 +75,12 @@ public class DoseService {
     }
 
     /**
-     * Calibra o instante do evento com o relogio do servidor (referencia absoluta em UTC):
-     * se o cliente informou o tempo decorrido desde o fato, usa-se agora - decorrido; senao
-     * aceita o timestamp do cliente limitado a uma janela plausivel (corrige relogios desregulados).
+     * Calibra o instante do evento com o relogio do servidor (referencia absoluta
+     * em UTC):
+     * se o cliente informou o tempo decorrido desde o fato, usa-se agora -
+     * decorrido; senao
+     * aceita o timestamp do cliente limitado a uma janela plausivel (corrige
+     * relogios desregulados).
      */
     public static Instant calibrate(Instant claimed, Long elapsedMs, Instant now) {
         if (elapsedMs != null && elapsedMs >= 0) {
@@ -86,7 +93,8 @@ public class DoseService {
         return claimed.isBefore(floor) ? floor : claimed;
     }
 
-    // -------------------------------------------------------------- eventos de pessoas (app/site)
+    // -------------------------------------------------------------- eventos de
+    // pessoas (app/site)
 
     @Transactional
     public RecordResult recordUserEvent(UUID userId, Source source, UserEventInput in) {
@@ -99,16 +107,34 @@ public class DoseService {
         }
         ScheduledDose dose = doses.findById(in.scheduledDoseId()).orElseThrow(() -> ApiException.notFound("Dose"));
         access.requireConfirm(userId, dose.getPatientId());
+
+        // NOVA REGRA: Verifica se o botão "Sim, tomei" (CONFIRMED_YES) pode ser
+        // pressionado
+        if (in.type() == DoseEventType.CONFIRMED_YES && dose.getOpenedAt() == null) {
+            Medication med = medications.findById(dose.getMedicationId()).orElse(null);
+            // Se o medicamento está atrelado a um compartimento da caixa, o compartimento
+            // DEVE ter sido aberto
+            if (med != null && med.getCompartmentId() != null) {
+                Compartment comp = compartments.findById(med.getCompartmentId()).orElse(null);
+                Integer compIndex = (comp != null) ? comp.getIndexNumber() : null;
+                throw ApiException.badRequest(
+                        "COMPARTMENT_NOT_OPENED",
+                        "Abra o compartimento " + (compIndex != null ? compIndex : "")
+                                + " na caixa antes de confirmar que tomou o medicamento.");
+            }
+        }
+
         Instant occurred = calibrate(in.occurredAt(), in.elapsedMs(), clock.instant());
         return record(new Command(in.eventId(), dose.getId(), dose.getPatientId(), dose.getMedicationId(), in.type(),
                 source, userId, null, null, occurred, in.seq(), in.justification()));
     }
 
-    // -------------------------------------------------------------- eventos da caixa (sensor)
+    // -------------------------------------------------------------- eventos da
+    // caixa (sensor)
 
     @Transactional
     public RecordResult recordDeviceOpening(IotDevice device, UUID eventId, int compartmentIndex, UUID doseId,
-                                            Instant claimedAt, Long elapsedMs, Long seq) {
+            Instant claimedAt, Long elapsedMs, Long seq) {
         Compartment c = compartments.findByDeviceIdAndIndexNumber(device.getId(), compartmentIndex)
                 .orElseThrow(() -> ApiException.badRequest("UNKNOWN_COMPARTMENT", "Compartimento inexistente"));
         if (c.getPatientId() == null) {
@@ -121,14 +147,16 @@ public class DoseService {
             Duration tol = Duration.ofMinutes(props.getDose().getToleranceMinutes());
             List<ScheduledDose> near = doses.findPendingBetween(med.getId(), occurred.minus(tol), occurred.plus(tol));
             resolvedDose = near.stream()
-                    .min(Comparator.comparingLong(d -> Math.abs(Duration.between(d.getScheduledAt(), occurred).toMillis())))
+                    .min(Comparator
+                            .comparingLong(d -> Math.abs(Duration.between(d.getScheduledAt(), occurred).toMillis())))
                     .map(ScheduledDose::getId).orElse(null);
         }
         return record(new Command(eventId, resolvedDose, c.getPatientId(), med == null ? null : med.getId(),
                 DoseEventType.BOX_OPENED, Source.DEVICE, null, device.getId(), compartmentIndex, occurred, seq, null));
     }
 
-    // -------------------------------------------------------------- nucleo idempotente
+    // -------------------------------------------------------------- nucleo
+    // idempotente
 
     @Transactional
     public RecordResult record(Command c) {
@@ -141,7 +169,8 @@ public class DoseService {
             dose = doses.findByIdForUpdate(c.scheduledDoseId()).orElseThrow(() -> ApiException.notFound("Dose"));
             if (!dose.getPatientId().equals(c.patientId())
                     || (c.medicationId() != null && !dose.getMedicationId().equals(c.medicationId()))) {
-                throw ApiException.badRequest("DOSE_MISMATCH", "Dose nao corresponde ao paciente/medicamento informado");
+                throw ApiException.badRequest("DOSE_MISMATCH",
+                        "Dose nao corresponde ao paciente/medicamento informado");
             }
         }
 
