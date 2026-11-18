@@ -42,7 +42,7 @@ void startNtp() {
   g_ntpStarted = true;
 }
 
-/** Plano recebido: aplica e, se o relogio ainda nao estiver valido, usa a hora do servidor como apoio. */
+/** Plano recebido: aplica e sempre sincroniza o relógio com a hora enviada pelo servidor. */
 void handlePlan(const uint8_t* payload, size_t len) {
   if (len == 0) {
     LOGF("[mqtt] Caixa excluida/desvinculada pelo titular. Limpando dados locais para portabilidade...\n");
@@ -52,12 +52,29 @@ void handlePlan(const uint8_t* payload, size_t len) {
     return;
   }
   if (!Plan::apply(payload, len, true)) return;
-  if (Util::nowEpoch() == 0 && Plan::serverTime() >= MIN_VALID_EPOCH) {
+  if (Plan::serverTime() >= MIN_VALID_EPOCH) {
     struct timeval tv = {(time_t)Plan::serverTime(), 0};
     settimeofday(&tv, nullptr);
-    LOGF("[hora] NTP indisponivel: relogio ajustado pela hora do servidor\n");
+    LOGF("[hora] Relogio sincronizado com a hora do servidor (epoch=%u)\n", (unsigned)Plan::serverTime());
   }
 }
+
+/** Plano recebido: aplica e, se o relogio ainda nao estiver valido, usa a hora do servidor como apoio. */
+// void handlePlan(const uint8_t* payload, size_t len) {
+//   if (len == 0) {
+//     LOGF("[mqtt] Caixa excluida/desvinculada pelo titular. Limpando dados locais para portabilidade...\n");
+//     Settings::factoryReset();
+//     delay(300);
+//     ESP.restart();
+//     return;
+//   }
+//   if (!Plan::apply(payload, len, true)) return;
+//   if (Util::nowEpoch() == 0 && Plan::serverTime() >= MIN_VALID_EPOCH) {
+//     struct timeval tv = {(time_t)Plan::serverTime(), 0};
+//     settimeofday(&tv, nullptr);
+//     LOGF("[hora] NTP indisponivel: relogio ajustado pela hora do servidor\n");
+//   }
+// }
 
 /** Confirmacao do servidor: {"ackedIds":[...],"rejected":[{"id":"...","reason":"..."}]}. */
 void handleAcks(const uint8_t* payload, size_t len) {
